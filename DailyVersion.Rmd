@@ -1,0 +1,259 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("/home/kegiles/ToyData/SandP500/")
+set.seed(1)
+library(readxl)
+library(plyr)
+library(dplyr)
+library(tidyselect)
+library(tidyr)
+library(broom)
+library(randomForest)
+library(xgboost)
+#library(topicmodels)
+library(tseries)
+library(fUnitRoots)
+```
+
+Summary of this markdowns functoin:
+1) Pull Yahoo finance data from a given set of stock symbols for a user-defined range of dates
+2) Identify daily open, high, and low for each stock over that range
+3) Forecast the daily highs and lows over a user-defined range
+4) Calculate the expected number of days each stock is to hit a user-defined pecrcent increase and decrease
+5) Calculate the time differential between these two expected durations.
+6) Rank stocks on earliest to hit expected return.
+
+Further notes:
+a) In this case, the daily stock data was previously captured, along with corresponding stock symbols.  The stock symbols were captured from this dataframe.  However, stock symbols can easily be downloaded from many sources and imported as list.   
+b) The Holt-Winters algorithm will fail for some stocks, see the relevant code chunk for details on how to handle this
+c) See bottom of script for some deprecated code that could be useful in filling in missing dates and prices. 
+
+#Import sanp500 data from disk 
+#Use this to isoalte a character vector of S and P 500 stck symbols
+```{r , eval=F}
+AllData <- read.table("AllStocks5Year.tsv",fill = T, header = T)
+AllData$Name <- as.character(AllData$Name)
+AllData$Name <- ifelse(AllData$Name == "","temp",AllData$Name)
+AllData$date <- as.character(AllData$date)
+AllData$date <- as.Date(AllData$date, "%Y-%m-%d")
+tmp <- data.frame(table(AllData$Name))
+StockSymbolsToDownload <- as.character(tmp$Var1)
+```
+
+#Import using QuantMod
+```{r setdates, eval = F}
+StartDate <- as.Date("2019-04-01", "%Y-%m-%d")
+EndDate <- as.Date("2019-04-30", "%Y-%m-%d")
+DateRange <- seq.Date(from = StartDate, to = EndDate, by = "day")
+OpeningDay <- as.Date("2019-05-01","%Y-%m-%d")
+ForecastStartDate <- EndDate+1
+ForecastEndDate <- ForecastStartDate+7
+ForecastRange <- ForecastEndDate - ForecastStartDate
+```
+
+```{r all training set library(quantmod)}
+sp500 <- new.env()
+sapply(StockSymbolsToDownload, function(x){try(getSymbols(x,from=StartDate-1,to=EndDate,env=sp500),silent=TRUE)})
+sp500 <- as.list(sp500)
+List <- matrix(0,ncol = length(sp500), nrow=difftime(time1 = EndDate+1, time2 = StartDate, units = c("days")))
+```
+
+```{r open on forecast day 1, eval = F}
+sp500_openingDay <- new.env()
+sapply(StockSymbolsToDownload,function(x){try(getSymbols(x,from=OpeningDay-1,to=OpeningDay,env=sp500_openingDay),silent=TRUE)})
+sp500_openingDay <- as.list(sp500_openingDay)
+```
+
+```{r Actual Closes for test/eval, eval = F}
+sp500_closeToTest <- new.env()
+sapply(StockSymbolsToDownload, function(x){try(getSymbols(x,from=ForecastStartDate,to=ForecastEndDate,env=sp500_closeToTest),silent=TRUE)})
+sp500_closeToTest <- as.list(sp500_closeToTest)
+```
+
+#Isolate Daily Opens
+```{r isolate each open price, eval = T}
+tmp <- NULL
+for (i in 1:length(sp500)){
+  #isolate each stock symbol, name columns, convert date, fill-in missing dates, create time series, run Holt Winters
+  #save the next 365 days as column in dataframe
+  tmp <- sp500[i] %>% as.data.frame()
+  tmp$Name <- names(sp500)[i]
+  tmp$Date <- rownames(tmp)
+  tmp <- tmp[c(1,7,8)]
+  colnames(tmp) <- c("open","name","date")
+  tmp$date <- as.Date(tmp$date, "%Y-%m-%d")
+  #Turn this off when just pulling a single date
+  tmp <- complete(data = tmp, date = seq.Date(from = StartDate,to = EndDate, by="day")) %>% fill(open) %>%  fill(name) %>% as.data.frame()
+  List[,i] <- tmp$open 
+  }
+OpenMatrix <- as.matrix(List)
+OpenDF <- t(OpenMatrix)
+OpenDF <- data.frame(OpenDF)
+colnames(OpenDF) <- format(as.Date(DateRange))
+rownames(OpenDF)<- names(sp500)
+```
+
+#Isolate Daily Opens for First Day
+```{r isolate each first open price, eval = T}
+ListOpeningDay <- matrix(0,ncol = length(sp500_openingDay), nrow=difftime(time1 = OpeningDay+1, time2 = OpeningDay-1, units = c("days")))
+tmp <- NULL
+for (i in 1:length(sp500_openingDay)){
+  #isolate each stock symbol, name columns, convert date, fill-in missing dates, create time series, run Holt Winters
+  #save the next 365 days as column in dataframe
+  tmp <- sp500_openingDay[i] %>% as.data.frame()
+  tmp$Name <- names(sp500_openingDay)[i]
+  tmp$Date <- rownames(tmp)
+  tmp <- tmp[c(1,7,8)]
+  colnames(tmp) <- c("open","name","date")
+  tmp$date <- as.Date(tmp$date, "%Y-%m-%d")
+  #Turn this off when just pulling a single date
+  tmp <- complete(data = tmp, date = seq.Date(from = OpeningDay-1,to = OpeningDay, by="day")) %>% fill(open) %>%  fill(name) %>% as.data.frame()
+  ListOpeningDay[,i] <- tmp$open 
+  }
+OpenMatrix <- as.matrix(ListOpeningDay)
+OpeningDayDF <- t(OpenMatrix)
+OpeningDayDF <- data.frame(OpeningDayDF)
+rownames(OpeningDayDF)<- names(sp500_openingDay)
+#colnames(OpeningDayDF) <- c(OpeningDay-2, OpeningDay-1)
+colnames(OpeningDayDF) <- format(as.Date(c(OpeningDay-2,OpeningDay-1)))
+head(OpeningDayDF)
+```
+
+
+
+#Isolate Daily Highs
+```{r Daily Highs, eval = T}
+for (i in 1:length(sp500)){
+  #isolate each stock symbol, name columns, convert date, fill-in missing dates, create time series, run Holt Winters
+  #save the next 365 days as column in dataframe
+  tmp <- sp500[i] %>% as.data.frame()
+  tmp$Name <- names(sp500)[i]
+  tmp$Date <- rownames(tmp)
+  tmp <- tmp[c(2,7,8)]
+  colnames(tmp) <- c("high","name","date")
+  tmp$date <- as.Date(tmp$date, "%Y-%m-%d")
+  tmp <- complete(data = tmp, date = seq.Date(from = StartDate, to = EndDate, by="day")) %>% fill(high) %>%  fill(name) %>%   as.data.frame()
+  List[,i] <- tmp$high 
+}
+HighDF <- t(List)
+HighDF <- as.data.frame(HighDF)
+colnames(HighDF)<- format(as.Date(DateRange))
+rownames(HighDF)<- names(sp500)
+```
+
+#Isolate Daily Lows
+```{r Daily Lows, eval = T}
+for (i in 1:length(sp500)){
+  #isolate each stock symbol, name columns, convert date, fill-in missing dates, create time series, run Holt Winters
+  #save the next 365 days as column in dataframe
+  tmp <- sp500[i] %>% as.data.frame()
+  tmp$Name <- names(sp500)[i]
+  tmp$Date <- rownames(tmp)
+  tmp <- tmp[c(3,7,8)]
+  colnames(tmp) <- c("low","name","date")
+  tmp$date <- as.Date(tmp$date, "%Y-%m-%d")
+  tmp <- complete(data = tmp, date = seq.Date(from = StartDate, to = EndDate, by = "day")) %>% fill(low) %>% fill(name) %>% as.data.frame()
+  List[,i] <- tmp$low
+  }
+LowDF <- t(List)
+LowDF <- as.data.frame(LowDF)
+colnames(LowDF)<- format(as.Date(DateRange))
+rownames(LowDF)<- names(sp500)
+```
+
+#Isolate Daily Close for train
+```{r Daily Close for Training, eval = T}
+for (i in 1:length(sp500)){
+  #isolate each stock symbol, name columns, convert date, fill-in missing dates, create time series, run Holt Winters
+  #save the next 365 days as column in dataframe
+  tmp <- sp500[i] %>% as.data.frame()
+  tmp$Name <- names(sp500)[i]
+  tmp$Date <- rownames(tmp)
+  tmp <- tmp[c(4,7,8)]
+  colnames(tmp) <- c("close","name","date")
+  tmp$date <- as.Date(tmp$date, "%Y-%m-%d")
+  tmp <- complete(data = tmp, date = seq.Date(from = StartDate, to = EndDate, by = "day")) %>% fill(close) %>% fill(name) %>% as.data.frame()
+  List[,i] <- tmp$close
+  }
+CloseDF <- t(List)
+CloseDF <- as.data.frame(CloseDF)
+colnames(CloseDF)<- format(as.Date(DateRange))
+rownames(CloseDF)<- names(sp500)
+```
+
+#Isolate Daily Close for Eval
+```{r Daily Close for Eval, eval = T}
+ListModelEval <- matrix(0,ncol = length(sp500_closeToTest), nrow=difftime(time1 = ForecastEndDate+1, time2 = ForecastStartDate, units = c("days")))
+for (i in 1:length(sp500_closeToTest)){
+  #isolate each stock symbol, name columns, convert date, fill-in missing dates, create time series, run Holt Winters
+  #save the next 365 days as column in dataframe
+  tmp <- sp500_closeToTest[i] %>% as.data.frame()
+  tmp$Name <- names(sp500_closeToTest)[i]
+  tmp$Date <- rownames(tmp)
+  tmp <- tmp[c(4,7,8)]
+  colnames(tmp) <- c("close","name","date")
+  tmp$date <- as.Date(tmp$date, "%Y-%m-%d")
+  tmp <- complete(data = tmp, date = seq.Date(from = ForecastStartDate, to = ForecastEndDate, by = "day")) %>% fill(close) %>% fill(name) %>% as.data.frame()
+  ListModelEval[,i] <- tmp$close
+  }
+ActualCloseDF <- t(ListModelEval)
+ActualCloseDF <- as.data.frame(ActualCloseDF)
+colnames(ActualCloseDF) <- seq.Date(from = ForecastStartDate, to = ForecastEndDate, by = "day")
+colnames(ActualCloseDF)<- format(as.Date(colnames(ActualCloseDF)))
+rownames(ActualCloseDF)<- names(sp500)
+head(ActualCloseDF)
+```
+
+
+
+#Forecast Daily Close
+```{r forecast High Price all 500 stocks}
+train <- data.matrix(CloseDF) 
+#remove the first date since its all N/A
+train <- train[,2:ncol(train)]
+ForecastRange <- seq.Date(from = ForecastStartDate, to = ForecastEndDate, by = "day")
+ForecastList <- matrix(data = 0,nrow = length(sp500),ncol =length(ForecastRange))
+
+#note, very important.  Some of the stocks will throw an "ABNORMAL_TERMINATOIN_IN_LNSSRCH" error.  This means there is a singularity in the data.  I don't have an elegant solution for this, except to skip that stock.  Unfortunately, the error causes the loop to drop out. So, you need to id the stock that threw the error and re-run the loop starting at the stock immediately following the one that caused the error. Continue this until you are done. 
+
+# If you really feel the need to forecast one of the stocks that threw the exception you have a few options.  First, you can go back and try again by setting a diffenent seed.  Second, you can use a different algorithm (ARIMA, ets, etc.). Third, you can slightly tweak the date ranges to generate a different time series that may not cause the error.  
+
+#Also, make sure to comment out the generation of the ForecastList so you don't overwrite the file.
+
+for (i in 1:nrow(train)){
+  #isolate each stock symbol, name columns, convert date, fill-in missing dates, create time series, run Holt Winters
+  #save the next 365 days as column in dataframe
+  tmpTS <- ts(data = train[i,],start = StartDate, end = EndDate, frequency = 365)
+  tmpHWmodel <- HoltWinters(x = tmpTS)
+  ForecastList[i,] <- predict(object = tmpHWmodel, n.ahead = length(ForecastRange))
+}
+ForecastList <- as.data.frame(ForecastList)
+colnames(ForecastList)<- seq.Date(from = ForecastStartDate, to=ForecastEndDate, by = "days")
+rownames(ForecastList) <- rownames(train)
+ForecastCloseDF <- ForecastList
+#write.table(ForecastHighDF,paste0("ForecastDailyHigh_",ForecastStartDate,"to",ForecastEndDate,".xlsx"),quote = F, col.names = T, row.names = T, sep = "\t")
+head(ForecastCloseDF)
+```
+Make choices 
+```{r combine last of actual open, close and forecast close, eval = F}
+Investment <- 1000
+ToPredict <- cbind(CloseDF[ncol(CloseDF)],ForecastCloseDF[ncol(ForecastCloseDF)])
+ToEvaluate <- cbind(CloseDF[ncol(CloseDF)],ActualCloseDF[ncol(ActualCloseDF)])
+ToPredict$PredictedReturn <- ToPredict[,2]/ToPredict[,1]
+ToEvaluate$ActualReturn <- ToEvaluate[,2]/ToEvaluate[,1]
+ToEvaluate$PredictedReturn <- ToPredict$PredictedReturn
+ToEvaluate$UporDownPredicted <- ifelse(ToEvaluate$PredictedReturn > 1, 1,-1)
+ToEvaluate$UporDownActual <- ifelse(ToEvaluate$ActualReturn > 1, 1, -1)
+ToEvaluate$Accuracy <- ifelse(ToEvaluate$UporDownPredicted == ToEvaluate$UporDownActual, 1, 0)
+ToEvaluate <- ToEvaluate[order(-ToEvaluate$PredictedReturn),]
+ToEvaluate$PandL <- (Investment * ToEvaluate$ActualReturn) - (Investment + 12)
+ToEvaluate$CumInvestment <- seq(from=1000, to=nrow(ToEvaluate)*1000,by = 1000)
+ToEvaluate$CumPandL <- cumsum(ToEvaluate$PandL)
+head(ToEvaluate)
+```
+
+

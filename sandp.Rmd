@@ -1,0 +1,274 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#setwd("./SandP500/")
+set.seed(1)
+library(readxl)
+library(plyr)
+library(dplyr)
+library(tidyselect)
+library(tidyr)
+library(broom)
+library(randomForest)
+library(xgboost)
+#library(topicmodels)
+library(tseries)
+library(fUnitRoots)
+```
+
+
+#Import sanp500 data 
+```{r , eval=F}
+AllData <- read.table("AllStocks5Year.tsv",fill = T, header = T)
+AllData$Name <- as.character(AllData$Name)
+AllData$Name <- ifelse(AllData$Name == "","temp",AllData$Name)
+AllData$date <- as.character(AllData$date)
+AllData$date <- as.Date(AllData$date, "%Y-%m-%d")
+```
+
+
+```{r perform holt winters on all stocks, eval = F}
+AllDataNarrow <- AllData[c(1,2,7)]
+AllDataNarrow <- subset(AllDataNarrow, Name != "")
+#isolate date range in two steps
+AllData2014to2016 <- subset(AllDataNarrow, date >= "2014-01-01")
+AllData2014to2016 <- subset(AllData2014to2016, date <= "2016-12-31")
+#convert dataframe into a list
+AllData2014to2016List <- split(AllData2014to2016, list(AllData2014to2016$Name))
+#Loop through list and perform Holt Winters on each stock
+set.seed(1)
+#Very Important!!! Holt winters will fail to optimize and throw an error.  You need to re-run the algorithm by moving the "i" variable over one to skip the stock that throws the error. Do this iteratively to capture as many as possible, and then just drop the zeros. You should be able to get a prediction for the vast majority
+ForecastList <<- matrix(0,ncol = 365, nrow = 500)
+#AMZN2014to2016 <- complete(data = AMZN2014to2016, date = seq.Date(as.Date("2014-01-02"),as.Date("2016-12-31"),by="day")) %>% fill(open) %>% fill(Name) %>% as.data.frame()
+#AMZN_TS <- ts(AMZN2014to2016$open, start = c(2014,1), end = c(2016,365), frequency = 365)
+```
+
+
+```{r forecast all 500 stocks}
+##Capture data from 2014 through 2016, then forecast forward all of 2017
+for (i in 1:500){
+  #isolate each stock symbol, name columns, convert date, fill-in missing dates, create time series, run Holt Winters
+  #save the next 365 days as column in dataframe
+  tmp <- AllData2014to2016List[i] %>% as.data.frame()
+  colnames(tmp) <- c("date","open","Name")
+  tmp$date <- as.Date(tmp$date, "%Y-%m-%d")
+  tmp <- complete(data = tmp, date = seq.Date(from = as.Date("2014-01-01"),to = as.Date("2016-12-31"),by="day")) %>% fill(open, .direction    = "down") %>% fill(Name, .direction="down") %>% as.data.frame()
+  tmp$open[is.na(tmp$open)]<- 0
+  tmp  <- tmp %>% fill(open) %>% as.data.frame()
+  tmp$Name[is.na(tmp$Name)]<- tmp$Name[2]
+  tmp <- subset(tmp, date != "2016-02-29")
+  tmpTS <- ts(tmp$open, start = c(2014,1), end = c(2016,365), frequency = 365)
+  tmpHWmodel <- HoltWinters(x = tmpTS)
+  ForecastList[i,] <- predict(object = tmpHWmodel, n.ahead = 365)
+}
+ForecastList <- head(ForecastList, 500)
+ForecastList <- as.data.frame(ForecastList)
+colnames(ForecastList)<- seq.Date(from = as.Date("2017-01-01"), to=as.Date("2017-12-31"), by = "days")
+Symbols <- group_by(AllData2014to2016,Name) %>% summarise(Symbol = first(Name))
+rownames(ForecastList) <- Symbols$Name
+#save as "ForecastList2017sandp".  Don't rebuild this every time
+```
+
+#ActualHighs
+```{r generate matrix of daily high prices, eval= F}
+AllData[2:6]<- lapply(AllData[2:6], function(x) as.numeric(as.character(x)))
+#Capture Actual Daily highs for 2017
+AllData2017 <- subset(AllData, date >= "2017-01-01")
+AllData2017 <- subset(AllData2017, date <= "2017-12-31")
+AllData2017 <- subset(AllData2017, Name != "")
+AllData2017Highs <- AllData2017[c(1,3,7)]
+AllData2017list <- split(AllData2017Highs, list(AllData2017$Name))
+HighsList <- matrix(0,ncol = 365, nrow = length(AllData2017list))
+Symbols2017 <- group_by(AllData2017,Name) %>% summarise(Symbol = first(Name))
+for (i in 1:length(AllData2017list)){
+  #isolate each stock symbol, name columns, convert date, fill-in missing dates, create time series, run Holt Winters
+  #save the next 365 days as column in dataframe
+  tmp <- AllData2017list[i] %>% as.data.frame()
+  colnames(tmp) <- c("date","high","Name")
+  tmp$date <- as.Date(tmp$date, "%Y-%m-%d")
+  tmp <- complete(data = tmp, date = seq.Date(as.Date("2017-01-01"),as.Date("2017-12-31"),by="day")) %>% fill(high) %>% fill(Name) %>% as.data.frame()
+  HighsList[i,] <- tmp$high 
+}
+rownames(HighsList)<- Symbols2017$Name
+HighsList <- as.data.frame(HighsList)
+colnames(HighsList)<- Dates2017
+ActualHighs <- HighsList
+```
+
+```{r generate matrix of daily low prices, eval= F}
+#Capture Actual Daily highs for 2017
+AllData2017 <- subset(AllData, date >= "2017-01-01")
+AllData2017 <- subset(AllData2017, date <= "2017-12-31")
+AllData2017 <- subset(AllData2017, Name != "")
+AllData2017Lows <- AllData2017[c(1,4,7)]
+AllData2017list <- split(AllData2017Lows, list(AllData2017$Name))
+LowsList <- matrix(0,ncol = 365, nrow = length(AllData2017list))
+Symbols2017 <- group_by(AllData2017,Name) %>% summarise(Symbol = first(Name))
+for (i in 1:length(AllData2017list)){
+  #isolate each stock symbol, name columns, convert date, fill-in missing dates, create time series, run Holt Winters
+  #save the next 365 days as column in dataframe
+  tmp <- AllData2017list[i] %>% as.data.frame()
+  colnames(tmp) <- c("date","low","Name")
+  tmp$date <- as.Date(tmp$date, "%Y-%m-%d")
+  tmp <- complete(data = tmp, date = seq.Date(as.Date("2017-01-01"),as.Date("2017-12-31"),by="day")) %>% fill(low) %>% fill(Name) %>% as.data.frame()
+  LowsList[i,] <- tmp$low 
+}
+rownames(LowsList)<- Symbols2017$Name
+LowsList <- as.data.frame(LowsList)
+colnames(LowsList)<- Dates2017
+LowsList[1:10,1:10]
+```
+
+```{r merge Forecast and Daily HIghs on common stocks, eval =F}
+ForecastList2017 <- read.table(file = "./ForecastList2017", header = T, sep = "\t")
+colnames(ForecastList2017) <- Dates2017
+ForecastAndHighsList <- merge(x = ForecastList2017, y = HighsList, by = "row.names")
+rownames(ForecastAndHighsList)<- ForecastAndHighsList$Row.names
+ForecastAndHighsList <- ForecastAndHighsList[-c(1)]
+ForecastMerged <- ForecastAndHighsList[c(1:365)]
+HighsListMerged <- ForecastAndHighsList[c(366:730)]
+colnames(ForecastMerged) <- Dates2017
+colnames(HighsListMerged) <- Dates2017
+#fill in first two dates of year with third day of the year due to NAs
+ForecastMerged[1:2]<- lapply(ForecastMerged[1:2], function(x) x = ForecastMerged$`2017-01-03`)
+HighsListMerged[1:2]<- lapply(HighsListMerged[1:2], function(x) x = HighsListMerged$`2017-01-03`)
+ForecastMergedTransposed <- t(ForecastMerged)
+HighsListMergedTransposed <- t(HighsListMerged)
+ForecastMergedTransposed <- as.data.frame(ForecastMergedTransposed)
+HighsListMergedTransposed <- as.data.frame(HighsListMergedTransposed)
+dim(HighsListMergedTransposed)
+```
+
+
+#Calculate the ROI for the daily highs
+```{r calculate ROI for each daily high relative to open on day 1, eval = F}
+HighReturns <- matrix(0,nrow = 365, ncol = 499)
+for (i in (1:ncol(HighsListMergedTransposed))){
+    for (j in 1:nrow(HighsListMergedTransposed)){
+      HighReturns[j,i] <- ForecastMergedTransposed[j,i]/ForecastMergedTransposed[1,i]
+    }
+  }
+HighReturns <- as.data.frame(HighReturns)
+colnames(HighReturns)<- colnames(ForecastMergedTransposed)
+rownames(HighReturns)<- rownames(ForecastMergedTransposed)
+rm(ReturnsFromJan1)
+HighReturns[1:5,1:5]
+```
+
+
+```{r find quickest to 10%, eval = F}
+#Isolate Amazon and FB
+#AMZNandFB <- subset(ReturnsFromJan1, select = c("AMZN","FB"))
+#AMZNandFB <- as.data.frame(AMZNandFB  )
+#Dates <- NULL
+#for (i in 1:2){
+#  tmp <- subset(AMZNandFB, AMZNandFB[i] > 1.1)
+#  Dates[i] <- rownames(tmp)[1]
+#}
+#Dates
+
+##Run above pilot for all 500
+PredictedReturnsFromJan1 <- as.data.frame(ReturnsFromJan1)
+Dates <- NULL
+for (i in 1:ncol(PredictedReturnsFromJan1)){
+  tmp <- subset(PredictedReturnsFromJan1, PredictedReturnsFromJan1[i] > 1.10)
+  Dates[i]<- rownames(tmp)[1]
+}
+PredictedUp <- cbind(colnames(PredictedReturnsFromJan1), Dates)
+PredictedUp <- as.data.frame(PredictedTo6)
+colnames(PredictedTo6)<- c("Symbol","DateUp")
+PredictedUp <- PredictedTo6[order(PredictedTo6$Date),]
+Top20Stocks <- as.character(PredictedTo6$Symbol[1:20])
+```
+
+```{r predict first to .98, eval = F}
+Dates <- NULL
+for (i in 1:ncol(PredictedReturnsFromJan1)){
+  tmp <- subset(PredictedReturnsFromJan1, PredictedReturnsFromJan1[i] < .10)
+  Dates[i]<- rownames(tmp)[1]
+}
+PredictedDown <- cbind(colnames(PredictedReturnsFromJan1),Dates)
+PredictedDown <- as.data.frame(PredictedDown2)
+colnames(PredictedDown2) <- c("Symbol","DateDown")
+```
+
+```{r Up6BeforDown2, eval = F}
+FinalPredicted <- merge(PredictedTo6, PredictedDown2, by = "Symbol")
+FinalPredicted$DateDiff <- as.numeric(difftime(FinalPredicted$DateUp, FinalPredicted$DateDown, units = c("days")))
+FinalPredicted$Symbol <- as.character(FinalPredicted$Symbol)
+FinalPredicted <- FinalPredicted[order(FinalPredicted$DateDiff),]
+Top20PredictedStocks <- FinalPredicted$Symbol[1:20]
+Top20PredictedStocks
+```
+
+```{r find when InPlay Stocks hit 6%, eval = F}
+InPlay <- subset(ActualReturnsFromJan1, select = c(Top20PredictedStocks))
+Dates <- NULL 
+for (i in 1:ncol(InPlay)){
+  tmp <- subset(InPlay, InPlay[i] >= 1.06)
+  Dates[i]<- rownames(tmp)[1]
+}
+ActualUp <- cbind(colnames(InPlay),Dates)
+ActualUp <- as.data.frame(ActualUp)
+colnames(ActualUp)<- c("Symbol","DateUp")
+ActualUp
+```
+
+```{r find when InPlay Stocks hit -2%, eval = F}
+InPlay <- subset(ActualReturnsFromJan1, select = c(Top20PredictedStocks))
+Dates <- NULL
+for (i in 1:ncol(InPlay)){
+  tmp <- subset(InPlay, InPlay[i] <= .9)
+  Dates[i]<- rownames(tmp)[1]
+}
+ActualDown <- cbind(colnames(InPlay),Dates)
+ActualDown <- as.data.frame(ActualDown)
+colnames(ActualDown)<- c("Symbol","DateDown")
+ActualDown
+```
+
+```{r merge Actual results, eval = F}
+ActualUpandDownDates <- merge(ActualUp, ActualDown, by = "Symbol")
+ActualUpandDownDates[2:3]<- lapply(ActualUpandDownDates[2:3], function(x) as.character(x))
+ActualUpandDownDates[2:3] <- lapply(ActualUpandDownDates[2:3], function(x) ifelse(is.na(x), "2017-12-31",x))
+ActualUpandDownDates[2:3]<- lapply(ActualUpandDownDates[2:3], function(x) as.Date(x, "%Y-%m-%d"))
+ActualUpandDownDates$FirstLimit <- as.numeric(difftime(ActualUpandDownDates$DateUp, ActualUpandDownDates$DateDown, units = c("days")))
+ActualUpandDownDates$PandL <- ifelse(ActualUpandDownDates$FirstLimit > 0, -100,100)
+table(ActualUpandDownDates$PandL)
+ActualUpandDownDates$LimitDate <- as.Date(ifelse(ActualUpandDownDates$PandL > 0, ActualUpandDownDates$DateUp,ActualUpandDownDates$DateDown))
+ActualUpandDownDates <- ActualUpandDownDates[order(ActualUpandDownDates$LimitDate),]
+ActualUpandDownDates$RollSum <- cumsum(x = ActualUpandDownDates$PandL)
+sum(ActualUpandDownDates$PandL)
+plot(as.Date(ActualUpandDownDates$LimitDate), as.numeric(ActualUpandDownDates$RollSum), type = "o")
+abline(v = c(as.Date("2017-02-01"), as.Date("2017-03-01"),as.Date("2017-04-01")))
+```
+
+
+```{r actual returns, eval = F}
+DatesToUp6
+ActualTimeToUp6 <- matrix(0,nrow = 365, ncol = 500)
+for (i in (1:ncol(ActualMergedTransposed))){
+    for (j in 1:nrow(ActualMergedTransposed)){
+      ActualTime[j,i] <- ActualMergedTransposed[j,i]/ActualMergedTransposed[1,i]
+    }
+}
+ActualReturnsFromJan1 <- as.data.frame(ActualReturnsFromJan1)
+rownames(ActualReturnsFromJan1) <- as.Date(Dates2017)
+colnames(ActualReturnsFromJan1) <- colnames(ActualMergedTransposed)
+ActualFromTop20 <- subset(ActualReturnsFromJan1, select = (Top20Stocks))
+EarliestUp6 <- NULL
+for (i in 1:ncol(ActualFromTop20)){
+  tmp <- subset(ActualFromTop20, ActualFromTop20[i] > 1.05)
+  ActualReturns[i]<- rownames(tmp)[1]
+}
+View(ActualFromTop20)
+```
+
+```{r viz, eval = F}
+Dates2017 <- as.Date(rownames(ActualMergedTransposed))
+plot(Dates2017, ActualMergedTransposed$FCX)
+points(Dates2017, ForecastMergedTransposed$FCX, col = "red")
+```
